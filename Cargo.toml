@@ -1,0 +1,6 @@
+[package]
+name = "scrape"
+version = "0.1.0"
+authors = ["Nils Wireklint <nils@wireklint.se>"]
+
+[dependencies]
