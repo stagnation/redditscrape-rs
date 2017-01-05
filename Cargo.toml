@@ -4,3 +4,5 @@ version = "0.1.0"
 authors = ["Nils Wireklint <nils@wireklint.se>"]
 
 [dependencies]
+select = "0.3.0"
+url = "0.2.0"
