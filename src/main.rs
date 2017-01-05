@@ -78,6 +78,31 @@ fn parse_reddit_json(json: Json) -> RedditEntry {
     }
 }
 
+fn cached_json(link: &Url) -> Option<Json> {
+    unimplemented!()
+}
+
+fn download_json(link: &Url) -> Json {
+    unimplemented!()
+}
+
+fn store_json(json: &Json) {
+    unimplemented!()
+}
+
+fn open_link_jsons(links: Vec<Url>) -> Vec<Json> {
+    links.iter().map(|link| {
+        match cached_json(link) {
+            Some(json) => json,
+            None => {
+                let json = download_json(link);
+                store_json(&json);
+                json
+            }
+        }
+    }).collect::<Vec<Json>>()
+}
+
 fn main() {
     let input_file = File::open("input.txt");
     let input_file = match input_file {
