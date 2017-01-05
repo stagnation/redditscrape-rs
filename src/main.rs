@@ -1,24 +1,20 @@
 extern crate url;
+extern crate serde_json;
 
-use std::path::{Path};
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufReader;
-use url::Url;
 
-// struct Metadata<'meta> {
-//     artist: Option<&'meta str>,
-//     track: Option<&'meta str>,
-//     album: Option<&'meta str>,
-//     number: Option<u32>,
-// }
+use url::Url;
 
 #[derive(Debug, PartialEq, Eq)]
 struct RedditEntry {
     url: Option<String>,
+    title: Option<String>,
+    subreddit: Option<String>,
     // metadata: Option<Metadata<'entry>>,
-    votes: Option<u32>,
-    comments: Option<u32>,
+    votes: Option<u64>,
+    comments: Option<u64>,
 }
 
 type Json = String;
@@ -55,10 +51,30 @@ fn parse_song_links_from_plain(file: &File) -> Vec<Url> {
     res
 }
 
+/// unwraps a serde_json Value type to option of a String
+fn value_to_string(val: Option<&serde_json::Value>) -> Option<String> {
+    val.map(|x| x.clone().as_str().unwrap().to_string())
+}
+
 fn parse_reddit_json(json: Json) -> RedditEntry {
-    RedditEntry{ url: None,
-    votes: None,
-    comments: None,
+    let json_parser: serde_json::Value = serde_json::from_str(&json).expect("could not parse json");
+    let pointer = "/0/data/children/0/data";
+    let deref = json_parser.pointer(pointer).expect("could not dereference json pointer");
+
+    println!("{:#?}", deref);
+    println!("");
+    println!("{:#?}", value_to_string(deref.find("title")));
+    println!("{:#?}", deref.find("num_comments"));
+    println!("{:#?}", deref.find("score"));
+    println!("{:#?}", deref.find("url"));
+    println!("{:#?}", deref.find("subreddit"));
+
+    RedditEntry{
+        url:       value_to_string(deref.find("url")),
+        title:     value_to_string(deref.find("title")),
+        subreddit: value_to_string(deref.find("subreddit")),
+        votes:     deref.find("score").map(|x| x.as_u64().unwrap()),
+        comments:  deref.find("num_comments").map(|x| x.as_u64().unwrap()),
     }
 }
 
@@ -76,27 +92,43 @@ fn main() {
     }
 }
 
+#[cfg(test)]
 mod test {
     use super::RedditEntry;
     use super::Json;
     use super::*;
-    use std::io::prelude::*;
     use std::fs::File;
 
     #[test]
     fn test_reddit_from_json() {
         let test_filename = "reddit.json";
-        let mut test_file = File::open("reddit.json").expect("could not open file");
-        println!("debug");
-        println!("{:?}", test_file);
+        let mut test_file = File::open(test_filename).expect("could not open file");
         let mut json: Json = String::new();
-        test_file.read_to_string(&mut json);
+        let read_result = test_file.read_to_string(&mut json);
+        assert!(read_result.is_ok());
 
         let result = parse_reddit_json(json);
         let expected = RedditEntry{
+            title: Some(String::from("[Black] Weakling - Dead as Dreams")),
+            subreddit: Some(String::from("Metal")),
             comments: Some(12),
             votes: Some(83),
-            url: None };
+            url: Some(String::from("https://www.youtube.com/watch?v=bbvBJMDbyeo")),
+        };
         assert_eq!(result, expected);
     }
+
+    #[test]
+    fn test_parse_link_file() {
+        let input_file = File::open("input.txt").expect("could not open input file");
+
+        let result = parse_song_links_from_plain(&input_file);
+        let expected = vec![
+            Url::parse("https://www.youtube.com/watch?v=o_3jJG_oGSs").unwrap(),
+            Url::parse("https://www.reddit.com/r/BlackMetal/comments/5elhkp/spectral_lore_cosmic_significance/").unwrap(),
+        ];
+
+        assert_eq!(result, expected);
+    }
+
 }
