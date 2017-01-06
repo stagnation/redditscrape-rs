@@ -4,6 +4,7 @@ extern crate curl;
 
 use std::fs::File;
 use std::io::prelude::*;
+use std::io::Error;
 use std::io::BufReader;
 
 use url::Url;
@@ -16,6 +17,18 @@ struct RedditEntry {
     subreddit: Option<String>,
     votes: Option<u64>,
     comments: Option<u64>,
+}
+
+struct Cache {}
+
+impl Cache {
+    fn try_to_get(&self, link: &Url) -> Option<Json> {
+        unimplemented!()
+    }
+
+    fn store(&mut self, data: &String) -> Result<(), Error> {
+        unimplemented!()
+    }
 }
 
 type Json = String;
@@ -70,7 +83,23 @@ fn parse_reddit_json(json: Json) -> RedditEntry {
     }
 }
 
-fn cached_json(link: &Url) -> Option<Json> {
+fn get_jsons(links: Vec<Url>, cache: &mut Cache) -> Vec<Json> {
+    let mut jsons = Vec::with_capacity(links.len());
+    for link in links {
+        let json = match cache.try_to_get(&link) {
+            Some(json) => json,
+            None => {
+                let json = download_json(link.clone());
+                cache.store(&json).expect("could not store in cache");
+                json
+            },
+        };
+        jsons.push(json);
+    }
+    jsons
+}
+
+fn cached_json(link: &Url, cache: &Cache) -> Option<Json> {
     unimplemented!()
 }
 
@@ -106,23 +135,6 @@ fn ensure_json_link(link: Url) -> Url {
     };
 
     link
-}
-
-fn store_json(json: &Json) {
-    unimplemented!()
-}
-
-fn open_link_jsons(links: Vec<Url>) -> Vec<Json> {
-    links.iter().map(|link| {
-        match cached_json(link) {
-            Some(json) => json,
-            None => {
-                let json = download_json(link.clone());
-                store_json(&json);
-                json
-            }
-        }
-    }).collect::<Vec<Json>>()
 }
 
 fn main() {
