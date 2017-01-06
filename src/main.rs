@@ -12,7 +12,6 @@ struct RedditEntry {
     url: Option<String>,
     title: Option<String>,
     subreddit: Option<String>,
-    // metadata: Option<Metadata<'entry>>,
     votes: Option<u64>,
     comments: Option<u64>,
 }
@@ -61,19 +60,11 @@ fn parse_reddit_json(json: Json) -> RedditEntry {
     let pointer = "/0/data/children/0/data";
     let deref = json_parser.pointer(pointer).expect("could not dereference json pointer");
 
-    println!("{:#?}", deref);
-    println!("");
-    println!("{:#?}", value_to_string(deref.find("title")));
-    println!("{:#?}", deref.find("num_comments"));
-    println!("{:#?}", deref.find("score"));
-    println!("{:#?}", deref.find("url"));
-    println!("{:#?}", deref.find("subreddit"));
-
     RedditEntry{
         url:       value_to_string(deref.find("url")),
         title:     value_to_string(deref.find("title")),
         subreddit: value_to_string(deref.find("subreddit")),
-        votes:     deref.find("score").map(|x| x.as_u64().unwrap()),
+        votes:     deref.find("score")       .map(|x| x.as_u64().unwrap()),
         comments:  deref.find("num_comments").map(|x| x.as_u64().unwrap()),
     }
 }
