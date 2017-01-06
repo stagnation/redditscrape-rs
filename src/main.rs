@@ -60,7 +60,7 @@ fn parse_reddit_json(json: Json) -> RedditEntry {
     let pointer = "/0/data/children/0/data";
     let deref = json_parser.pointer(pointer).expect("could not dereference json pointer");
 
-    RedditEntry{
+    RedditEntry {
         url:       value_to_string(deref.find("url")),
         title:     value_to_string(deref.find("title")),
         subreddit: value_to_string(deref.find("subreddit")),
@@ -73,8 +73,21 @@ fn cached_json(link: &Url) -> Option<Json> {
     unimplemented!()
 }
 
-fn download_json(link: &Url) -> Json {
+fn download_json(link: Url) -> Json {
     unimplemented!()
+}
+
+fn link_to_json(link: Url) -> Url {
+    let last_interim = link.clone();
+    let last_interim = last_interim.path_segments();
+    let last = last_interim.expect("invalid url").last();
+
+    let link = match last {
+        Some(".json") =>  link,
+        _ => link.join(".json").expect("json url could not be constructed"),
+    };
+
+    link
 }
 
 fn store_json(json: &Json) {
@@ -86,7 +99,7 @@ fn open_link_jsons(links: Vec<Url>) -> Vec<Json> {
         match cached_json(link) {
             Some(json) => json,
             None => {
-                let json = download_json(link);
+                let json = download_json(link.clone());
                 store_json(&json);
                 json
             }
@@ -145,6 +158,15 @@ mod test {
         ];
 
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_json_link() {
+        let url = Url::parse("https://www.reddit.com/r/BlackMetal/comments/5elhkp/spectral_lore_cosmic_significance/").unwrap();
+        let expected = Url::parse("https://www.reddit.com/r/BlackMetal/comments/5elhkp/spectral_lore_cosmic_significance/.json").unwrap();
+
+        assert_eq!(link_to_json(url), expected);
+        assert_eq!(link_to_json(expected.clone()), expected);
     }
 
 }
