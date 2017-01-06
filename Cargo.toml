@@ -7,3 +7,4 @@ authors = ["Nils Wireklint <nils@wireklint.se>"]
 select = "0.3.0"
 url = "1.2.3"
 serde_json = "0.8.0"
+curl = "0.4.2"

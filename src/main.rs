@@ -1,11 +1,13 @@
 extern crate url;
 extern crate serde_json;
+extern crate curl;
 
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufReader;
 
 use url::Url;
+use curl::easy::Easy;
 
 #[derive(Debug, PartialEq, Eq)]
 struct RedditEntry {
@@ -36,11 +38,10 @@ fn parse_song_links_from_plain(file: &File) -> Vec<Url> {
     for line in file.lines() {
         unwrap_or_skip!(line, "buf reader error");
 
-        println!("l: {}", line);
         let url = Url::parse(&line);
         match url {
             Err(e) => {
-                println!("parse error: {}", e);
+                println!("parse error: {}: {:?}", e, line);
                 continue;
             },
             Ok(url) => res.push(url),
@@ -74,17 +75,34 @@ fn cached_json(link: &Url) -> Option<Json> {
 }
 
 fn download_json(link: Url) -> Json {
-    unimplemented!()
+    let link = ensure_json_link(link);
+
+    let mut handle = Easy::new();
+    let mut data = Vec::new();
+    handle.url(link.as_str())
+        .expect("could not use link");
+    {
+        let mut transfer = handle.transfer();
+        transfer.write_function(|new_data| {
+            data.extend_from_slice(new_data);
+            Ok(new_data.len())
+        }).expect("download error");
+        transfer.perform().expect("transfer error");
+    }
+
+    let response = Json::from_utf8(data).expect("could not stringify data");
+
+    response
 }
 
-fn link_to_json(link: Url) -> Url {
+fn ensure_json_link(link: Url) -> Url {
     let last_interim = link.clone();
     let last_interim = last_interim.path_segments();
-    let last = last_interim.expect("invalid url").last();
+    let last = last_interim.expect("invalid url").last().expect("empty path segments");
 
-    let link = match last {
-        Some(".json") =>  link,
-        _ => link.join(".json").expect("json url could not be constructed"),
+    let link = match last.ends_with(".json") {
+        true =>  link,
+        false => link.join(".json").expect("json url could not be constructed"),
     };
 
     link
@@ -165,8 +183,41 @@ mod test {
         let url = Url::parse("https://www.reddit.com/r/BlackMetal/comments/5elhkp/spectral_lore_cosmic_significance/").unwrap();
         let expected = Url::parse("https://www.reddit.com/r/BlackMetal/comments/5elhkp/spectral_lore_cosmic_significance/.json").unwrap();
 
-        assert_eq!(link_to_json(url), expected);
-        assert_eq!(link_to_json(expected.clone()), expected);
+        assert_eq!(ensure_json_link(url), expected);
+        assert_eq!(ensure_json_link(expected.clone()), expected);
+
+        let url = Url::parse("http://aelv.se/spill/ul/test_json.json").expect("could not parse url");
+
+        assert_eq!(ensure_json_link(url.clone()), url);
+    }
+
+    #[test]
+    fn test_download() {
+        let url = Url::parse("http://aelv.se/spill/ul/test_json.json").expect("could not parse test url");
+        let expected = Json::from("{ \"a\" : \"b\" }\n");
+
+        assert_eq!(download_json(url), expected);
+
+        // NB(nils): too much hassle to test this
+        // let url = Url::parse("https://www.reddit.com/r/Metal/comments/5k0ncr/black_weakling_dead_as_dreams/").unwrap();
+        // let mut test_file = File::open("reddit.json").expect("could not open file");
+        // let mut expected_json: Json = String::new();
+        // let read_result = test_file.read_to_string(&mut expected_json);
+        // assert!(read_result.is_ok());
+
+        // let downloaded_json = download_json(url);
+
+        // println!("{}", downloaded_json.len());
+        // println!("{}", expected_json.len());
+
+        // let parsed_downloaded_json: serde_json::Value = serde_json::from_str(&downloaded_json)
+        //     .expect("could not parse json");
+        // let parsed_expected_json: serde_json::Value = serde_json::from_str(&expected_json)
+        //     .expect("could not parse json");
+
+        // println!("{}", parsed_expected_json == parsed_downloaded_json);
+        // // assert_eq!(parsed_downloaded_json, parsed_expected_json)
+        // assert!(false);
     }
 
 }
