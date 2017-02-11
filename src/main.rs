@@ -2,7 +2,7 @@ extern crate url;
 extern crate serde_json;
 extern crate curl;
 
-use std::fs::File;
+use std::fs::{File, ReadDir};
 use std::path::PathBuf;
 use std::io::prelude::*;
 use std::io::Error;
@@ -14,7 +14,7 @@ use curl::easy::Easy;
 
 #[derive(Debug, PartialEq, Eq)]
 struct RedditEntry {
-    url: Option<String>,
+    url: Option<Url>,
     title: Option<String>,
     subreddit: Option<String>,
     votes: Option<u64>,
@@ -22,10 +22,11 @@ struct RedditEntry {
 }
 
 use std::collections::HashMap;
-struct Cache {
-    storage: HashMap<Url, PathBuf>,
-    directory: PathBuf,
 
+#[derive(Debug)]
+struct Cache {
+    storage: HashMap<Url, Json>,
+    directory: PathBuf,
 }
 
 impl Cache {
@@ -38,19 +39,83 @@ impl Cache {
         match save_json_file(&filename, &data) {
             // TODO(nils): and_then?
             Ok(()) => {
-                self.storage.insert(key, filename);
+                self.storage.insert(key, data.clone());
                 Ok(())
             },
             Err(e) => Err(e)
         }
     }
 
-    pub fn load_cache(path: &PathBuf) -> Cache {
-        unimplemented!()
+    // cache is stored as a dir full of json files
+    pub fn load_cache_from_directory(cache_directory_path: &PathBuf) -> Option<Cache> {
+        assert!(cache_directory_path.is_dir(), "cache path needs to be a directory");
+
+        let cache_content = std::fs::read_dir(cache_directory_path);
+
+        match cache_content { // any error reading contents of directory?
+            Err(_) => return None,
+            Ok(cache_content) => {
+                // let cache_content = cache_content
+                //     .map(|ok_file| ok_file // only handle files that could be read
+                //         .filter(|file| file.path().ends_with(".json"))
+                //     )
+                //     .map(|file| load_json_file(file))
+                //     .collect::<Vec<_>>();
+
+                // let cache_content: ReadDir = cache_content; /// DEBUG
+                // let cache_content = cache_content.filter(|entry| entry.is_ok()).collect::<Vec<_>>();
+
+                // /// NB(nils): remove any entries that could not be read from disk
+
+                // let cache_content: Vec<std::fs::DirEntry> = cache_content; /// DEBUG
+
+                // let cache_content = cache_content.map(|file| load_json_file(file));
+
+
+
+                let mut result = Vec::new();
+                {   // NB(nils): callback to populate the vector of valid pathbufs in cache
+                    // FIXME(nils): this seems very convoluted, ought to be possible with iterators
+                    let mut callback = |item: std::fs::DirEntry| result.push(item.path());
+                    for entry in cache_content {
+                        match entry {
+                            Ok(ent) => callback(ent),
+                            _ => { ; },
+                        }
+                    }
+                }
+
+                let result: Vec<PathBuf> = result; // DEBUG
+                let result = result.into_iter()
+                    .filter(|file_path| file_path.ends_with(".json"))
+                    .flat_map(|json_file| load_json_file(json_file))
+                    .collect::<Vec<_>>();
+
+                let result :Vec<Json> = result; // DEBUG
+                let mut storage = HashMap::new();
+                for json in result {
+                    parse_reddit_json(json.clone()).map(|reddit|
+                                                reddit.url.map(|url| storage.insert(url, json))
+                                               );
+                }
+
+                let storage = storage; // immutable
+                return Some(Cache {
+                    storage: storage,
+                    directory: cache_directory_path.clone(),
+                });
+            }
+        }
+        None
     }
 }
 
 type Json = String;
+// impl Clone for Json {
+//     fn clone(self) -> Self {
+//         format!("{}", self)
+//     }
+// }
 
 fn load_json_file<T>(path: T) -> Option<Json>
 where T: AsRef<std::path::Path> {
@@ -152,18 +217,22 @@ fn value_to_string(val: Option<&serde_json::Value>) -> Option<String> {
     val.map(|x| x.clone().as_str().unwrap().to_string())
 }
 
-fn parse_reddit_json(json: Json) -> RedditEntry {
+fn parse_reddit_json(json: Json) -> Option<RedditEntry> {
+    // TODO(nils): error handling
     let json_parser: serde_json::Value = serde_json::from_str(&json).expect("could not parse json");
     let pointer = "/0/data/children/0/data";
     let deref = json_parser.pointer(pointer).expect("could not dereference json pointer");
 
-    RedditEntry {
-        url:       value_to_string(deref.find("url")),
+    let url_string = value_to_string(deref.find("url"));
+    let url = url_string.map(|u| Url::parse(u.as_str()));
+
+    Some(RedditEntry {
+        url:       url.expect("could not parse json url").ok(),
         title:     value_to_string(deref.find("title")),
         subreddit: value_to_string(deref.find("subreddit")),
         votes:     deref.find("score")       .and_then(|x| x.as_u64()),
         comments:  deref.find("num_comments").and_then(|x| x.as_u64()),
-    }
+    })
 }
 
 fn get_jsons(links: Vec<Url>, cache: &mut Cache) -> Vec<Json> {
@@ -254,9 +323,9 @@ mod test {
             subreddit: Some(String::from("Metal")),
             comments: Some(12),
             votes: Some(83),
-            url: Some(String::from("https://www.youtube.com/watch?v=bbvBJMDbyeo")),
+            url: Url::parse("https://www.youtube.com/watch?v=bbvBJMDbyeo").ok(),
         };
-        assert_eq!(result, expected);
+        assert_eq!(result, Some(expected));
     }
 
     #[test]
@@ -335,4 +404,12 @@ mod test {
         // assert!(false);
     }
 
+    #[test]
+    fn test_jsonIO() {
+        let json = Json::from("{ \"a\" : \"b\" }\n");
+        let filename = PathBuf::from("/tmp/_reddit_scrape_test.json");
+        save_json_file(&filename, &json);
+        let result = load_json_file(&filename);
+        assert_eq!(Some(json), result);
+    }
 }
