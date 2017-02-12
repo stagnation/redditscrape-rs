@@ -2,12 +2,12 @@ extern crate url;
 extern crate serde_json;
 extern crate curl;
 
-use std::fs::{File, ReadDir};
-use std::path::PathBuf;
+use std::fs::File;
+use std::path::{PathBuf,Path};
 use std::io::prelude::*;
 use std::io::Error;
 use std::io::BufReader;
-use std::collections::VecDeque;
+use std::ffi::OsStr;
 
 use url::Url;
 use curl::easy::Easy;
@@ -31,11 +31,13 @@ struct Cache {
 }
 
 impl Cache {
-    fn new<P: AsRef<std::path::Path>>(cache_directory_path: P) -> Cache {
-        let cache_directory_path: &std::path::Path = cache_directory_path.as_ref();
-        let mut storage: HashMap<String, Json> = HashMap::new();
+    fn new<P: AsRef<Path>>(cache_directory_path: P) -> Cache {
+        let cache_directory_path: &Path = cache_directory_path.as_ref();
+        let storage: HashMap<String, Json> = HashMap::new();
 
-        std::fs::create_dir_all(cache_directory_path);
+        let result = std::fs::create_dir_all(cache_directory_path);
+        assert!(result.is_ok(), "Cache error: could not create directory {:?}",
+            cache_directory_path);
         assert!(cache_directory_path.is_dir(),
             "Cache error: {:?} is not a directory", cache_directory_path);
 
@@ -46,7 +48,7 @@ impl Cache {
     }
 
     fn try_to_get(&self, key: &String) -> Option<Json> {
-        self.storage.get(key).and_then(load_json_file)
+        self.storage.get(key).map(|val| val.clone())
     }
 
     fn store(&mut self, key: String, data: &Json) -> Result<(), Error> {
@@ -64,9 +66,9 @@ impl Cache {
 
     // cache is stored as a dir full of json files
     pub fn load_cache_from_directory<P>(cache_directory_path: P) -> Option<Cache>
-        where P: AsRef<std::path::Path>
+        where P: AsRef<Path>
     {
-        let cache_directory_path: &std::path::Path = cache_directory_path.as_ref();
+        let cache_directory_path: &Path = cache_directory_path.as_ref();
         assert!(cache_directory_path.is_dir(), "cache path needs to be a directory");
 
         let cache_content = std::fs::read_dir(cache_directory_path);
@@ -74,24 +76,6 @@ impl Cache {
         match cache_content { // any error reading contents of directory?
             Err(_) => return None,
             Ok(cache_content) => {
-                // let cache_content = cache_content
-                //     .map(|ok_file| ok_file // only handle files that could be read
-                //         .filter(|file| file.path().ends_with(".json"))
-                //     )
-                //     .map(|file| load_json_file(file))
-                //     .collect::<Vec<_>>();
-
-                // let cache_content: ReadDir = cache_content; /// DEBUG
-                // let cache_content = cache_content.filter(|entry| entry.is_ok()).collect::<Vec<_>>();
-
-                // /// NB(nils): remove any entries that could not be read from disk
-
-                // let cache_content: Vec<std::fs::DirEntry> = cache_content; /// DEBUG
-
-                // let cache_content = cache_content.map(|file| load_json_file(file));
-
-
-
                 let mut result = Vec::new();
                 {   // NB(nils): callback to populate the vector of valid pathbufs in cache
                     // FIXME(nils): this seems very convoluted, ought to be possible with iterators
@@ -105,7 +89,7 @@ impl Cache {
                 }
 
                 let result = result.into_iter()
-                    .filter(|file_path| file_path.extension() == Some(std::ffi::OsStr::new("json")))
+                    .filter(|file_path| file_path.extension() == Some(OsStr::new("json")))
                     .flat_map(|json_file| load_json_file(json_file))
                     .collect::<Vec<_>>();
 
@@ -123,19 +107,13 @@ impl Cache {
                 });
             }
         }
-        None
     }
 }
 
 type Json = String;
-// impl Clone for Json {
-//     fn clone(self) -> Self {
-//         format!("{}", self)
-//     }
-// }
 
 fn load_json_file<T>(path: T) -> Option<Json>
-where T: AsRef<std::path::Path> {
+where T: AsRef<Path> {
     let mut file = File::open(path).expect("could not open file");
     let mut json: Json = String::new();
     let read_result = file.read_to_string(&mut json);
@@ -147,7 +125,7 @@ where T: AsRef<std::path::Path> {
 }
 
 fn save_json_file<T>(path: T, json: &Json) -> Result<(), Error>
-where T: AsRef<std::path::Path> {
+where T: AsRef<Path> {
     let mut file = File::create(path).expect("could not open file");
     file.write_all(json.as_bytes())
 }
@@ -171,8 +149,8 @@ fn id_from_link(link: &Url) -> Option<String> {
 /// with optional id, using reddits internal id for threads
 /// and name from the post title
 fn filename_from_link<T>(link: &Url, base: T) -> PathBuf
-where T: AsRef<std::path::Path> {
-    let base :&std::path::Path = base.as_ref();
+where T: AsRef<Path> {
+    let base :&Path = base.as_ref();
 
     let path_vec = link.path_segments().map(|c| c.collect::<Vec<_>>());
     let mut path_vec = path_vec.expect("could not extract path segments");
@@ -186,32 +164,6 @@ where T: AsRef<std::path::Path> {
 
     base.join(filename)
 }
-/* {
-    // want the last two elements
-    let RENAME = link.clone();
-    // FIXME(nils): path_segments may not work as intended
-    // FIXME(nils): and only return the full string as one segment
-    let RENAME = RENAME.path_segments();
-
-    let mut queue = VecDeque::with_capacity(2);
-    println!(":{:?}", link);
-    for seg in RENAME {
-        println!("-{:?}", seg);
-        if queue.len() == 2 {
-            queue.pop_front();
-        }
-        queue.push_back(seg.clone().collect::<String>());
-    }
-    //
-    // now queue should be populated with the last two elements in order
-    let id = queue.get(0).expect("error no information in path").clone();
-    let title = queue.get(1).expect("error no information in path").clone();
-    let filename = format!("{}_{}.json", id, title);
-
-    let base = base.clone();
-    base.join(filename)
-}
-*/
 
 macro_rules! unwrap_or_skip {
     ($result:ident, $message:expr) => {
@@ -249,8 +201,8 @@ fn value_to_string(val: Option<&serde_json::Value>) -> Option<String> {
     val.map(|x| x.clone().as_str().unwrap().to_string())
 }
 
+// TODO(nils): error handling
 fn parse_reddit_json(json: &Json) -> Option<RedditEntry> {
-    // TODO(nils): error handling
     let json_parser: serde_json::Value = serde_json::from_str(&json).expect("could not parse json");
     let pointer = "/0/data/children/0/data";
     let deref = json_parser.pointer(pointer).expect("could not dereference json pointer");
@@ -287,7 +239,6 @@ fn get_entries(links: Vec<Url>, cache: &mut Cache) -> Vec<Json> {
 
 // NB(nils): keep in mind reddit's two second rule
 fn download_json(link: Url) -> Json {
-    // NB(nils): keep in mind reddit's two second rule
     let link = ensure_json_link(link);
 
     let mut handle = Easy::new();
@@ -309,20 +260,16 @@ fn download_json(link: Url) -> Json {
 }
 
 fn ensure_json_link(link: Url) -> Url {
-    // FIXME(nils): path_segments may not work as intended
-    // FIXME(nils): and only return the full string as one segment
-    let last_interim = link.clone();
-    let last_interim = last_interim.path_segments();
-    let last = last_interim.expect("invalid url").last().expect("empty path segments");
-
-    let link = match last.ends_with(".json") {
+    match link.as_str().ends_with(".json") {
         true =>  link,
         false => link.join(".json").expect("json url could not be constructed"),
-    };
-
-    link
+    }
 }
 
+/// output: links / written to file
+/// output*: cache
+/// input: links / file
+/// input: cache directory
 fn main() {
     // NB(nils): provide cache directory
     let input_file = File::open("input.txt");
@@ -348,7 +295,7 @@ mod test {
 
     #[test]
     fn test_reddit_from_json() {
-        let test_filename = "test_resources/reddit.json";
+        let test_filename = "test_resources/5k0ncr.json";
         let json = load_json_file(test_filename).unwrap();
 
         let result = parse_reddit_json(&json);
@@ -384,14 +331,16 @@ mod test {
         assert_eq!(ensure_json_link(url), expected);
         assert_eq!(ensure_json_link(expected.clone()), expected);
 
-        let url = Url::parse("http://aelv.se/spill/ul/test_json.json").expect("could not parse url");
+        let url = Url::parse("http://aelv.se/spill/ul/test_json.json")
+            .expect("could not parse url");
 
         assert_eq!(ensure_json_link(url.clone()), url);
     }
 
     #[test]
     fn test_dependency_path_segment() {
-        assert_eq!(Url::parse("https://github.com/rust-lang/rust/issues").expect("could not parse url")
+        assert_eq!(Url::parse("https://github.com/rust-lang/rust/issues")
+                   .expect("could not parse url")
                    .path_segments().map(|c| c.collect::<Vec<_>>()),
                    Some(vec!["rust-lang", "rust", "issues"]));
 
@@ -412,38 +361,19 @@ mod test {
 
     #[test]
     fn test_download() {
-        let url = Url::parse("http://aelv.se/spill/ul/test_json.json").expect("could not parse test url");
+        let url = Url::parse("http://aelv.se/spill/ul/test_json.json")
+            .expect("could not parse test url");
         let expected = Json::from("{ \"a\" : \"b\" }\n");
 
         assert_eq!(download_json(url), expected);
-
-        // NB(nils): too much hassle to test this
-        // let url = Url::parse("https://www.reddit.com/r/Metal/comments/5k0ncr/black_weakling_dead_as_dreams/").unwrap();
-        // let mut test_file = File::open("reddit.json").expect("could not open file");
-        // let mut expected_json: Json = String::new();
-        // let read_result = test_file.read_to_string(&mut expected_json);
-        // assert!(read_result.is_ok());
-
-        // let downloaded_json = download_json(url);
-
-        // println!("{}", downloaded_json.len());
-        // println!("{}", expected_json.len());
-
-        // let parsed_downloaded_json: serde_json::Value = serde_json::from_str(&downloaded_json)
-        //     .expect("could not parse json");
-        // let parsed_expected_json: serde_json::Value = serde_json::from_str(&expected_json)
-        //     .expect("could not parse json");
-
-        // println!("{}", parsed_expected_json == parsed_downloaded_json);
-        // // assert_eq!(parsed_downloaded_json, parsed_expected_json)
-        // assert!(false);
     }
 
     #[test]
-    fn test_jsonIO() {
+    fn test_json_IO() {
         let json = Json::from("{ \"a\" : \"b\" }\n");
         let filename = PathBuf::from("/tmp/_reddit_scrape_test.json");
-        save_json_file(&filename, &json);
+        let io_result = save_json_file(&filename, &json);
+        assert!(io_result.is_ok());
         let result = load_json_file(&filename);
         assert_eq!(Some(json), result);
     }
@@ -453,9 +383,11 @@ mod test {
         let cache_directory_path = PathBuf::from("test_resources");
         let cache = Cache::load_cache_from_directory(&cache_directory_path);
 
-        let expected_json = load_json_file(cache_directory_path.join("reddit.json")).expect("could not load json file for test");
+        let expected_json = load_json_file(cache_directory_path.join("5k0ncr.json"))
+            .expect("could not load json file for test");
         let mut expected_storage = HashMap::new();
-        expected_storage.insert(parse_reddit_json(&expected_json).unwrap().reddit_id.unwrap(), expected_json);
+        expected_storage.insert(parse_reddit_json(&expected_json)
+                                .unwrap().reddit_id.unwrap(), expected_json);
         let expected = Cache {
             storage: expected_storage,
             directory: cache_directory_path,
@@ -469,20 +401,45 @@ mod test {
     }
 
     #[test]
-    fn test_cacheIO() {
-        let filepath = "test_resources/reddit.json";
+    fn test_cache_IO() {
+        let filepath = "test_resources/5k0ncr.json";
         let cache_directory_path = "/tmp/_reddit_scrape_test_cache/";
         let mut cache = Cache::new(&cache_directory_path);
 
         let json = load_json_file(&filepath).expect("could not load json file");
         let reddit = parse_reddit_json(&json).expect("could not create reddit struct");
 
-        cache.store(reddit.reddit_id.unwrap(), &json);
+        let io_result = cache.store(reddit.reddit_id.unwrap(), &json);
+        assert!(io_result.is_ok());
         // TODO(nils): when are files flushed in the cache?
 
         let new_cache = Cache::load_cache_from_directory(&cache_directory_path);
 
         assert_eq!(Some(cache), new_cache);
+    }
+
+    #[test]
+    fn test_try_to_get_from_cache() {
+        let cache_directory_path = "test_resources";
+        let mut cache = Cache::load_cache_from_directory(&cache_directory_path)
+            .expect("could not load cache");
+
+        let filepath = "test_resources/5k0ncr.json";
+        let json = load_json_file(&filepath).expect("could not load json file");
+
+        let key = String::from("5k0ncr");
+
+        let result = cache.try_to_get(&key);
+        assert!(result.is_some());
+        assert_eq!(Some(json.clone()), result);
+
+        let url = Url::parse("https://www.reddit.com/r/Metal/comments/5k0ncr/black_weakling_dead_as_dreams/")
+            .expect("could not parse url");
+        let jsons = get_entries(vec![url], &mut cache);
+
+        // NB(nils): this might fail if the cache does not work
+        // NB(nils): and the json is instead downloaded
+        assert_eq!(vec![json], jsons);
     }
 
 }
