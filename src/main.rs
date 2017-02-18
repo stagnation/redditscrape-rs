@@ -179,15 +179,34 @@ macro_rules! unwrap_or_skip {
 }
 
 fn parse_song_links_from_plain(file: &File) -> Vec<Url> {
+    let some_identity_function = |s: String| Some(s.clone());
+    parse_song_links_from_file(file, some_identity_function)
+}
+
+fn bookmark_cleanup(line: String) -> Option<String>{
+    line.split('"').nth(1).map(|s| s.to_string())
+}
+
+fn parse_song_links_from_bookmark(bookmark: &File) -> Vec<Url> {
+    parse_song_links_from_file(bookmark, bookmark_cleanup)
+}
+
+fn parse_song_links_from_file<'line_life, F>(file: &File, line_preprocess: F) -> Vec<Url>
+where F: Fn(String) -> Option<String> {
     let mut res : Vec<Url> = vec![];
     let file = BufReader::new(file);
     for line in file.lines() {
         unwrap_or_skip!(line, "buf reader error");
 
-        let url = Url::parse(&line);
+        let preprocessed = match line_preprocess(line){
+            Some(prep) => prep,
+            None => continue,
+        };
+
+        let url = Url::parse(&preprocessed);
         match url {
             Err(e) => {
-                println!("parse error: {}: {:?}", e, line);
+                // println!("parse error: {}: {:?}", e, line);
                 continue;
             },
             Ok(url) => res.push(url),
@@ -197,16 +216,15 @@ fn parse_song_links_from_plain(file: &File) -> Vec<Url> {
     res
 }
 
-/// unwraps a serde_json Value type to option of a String
-fn value_to_string(val: Option<&serde_json::Value>) -> Option<String> {
-    val.map(|x| x.clone().as_str().unwrap().to_string())
-}
-
 // TODO(nils): error handling
 fn parse_reddit_json(json: &Json) -> Option<RedditEntry> {
     let json_parser: serde_json::Value = serde_json::from_str(&json).expect("could not parse json");
     let pointer = "/0/data/children/0/data";
     let deref = json_parser.pointer(pointer).expect("could not dereference json pointer");
+
+    let value_to_string = |val: Option<&serde_json::Value>| {
+        val.map(|x| x.clone().as_str().unwrap().to_string())
+    };
 
     let url_string = value_to_string(deref.find("url"));
     let url = url_string.map(|u| Url::parse(u.as_str()));
@@ -321,6 +339,28 @@ mod test {
         ];
 
         assert_eq!(result, expected);
+
+    }
+
+    #[test]
+    fn test_bookmark_entry_preprocess() {
+        let mut bookmark_entry = File::open("test_resources/bookmark_entry.txt").expect("could not open entry");
+
+        let mut entry = String::new();
+        let read_result = bookmark_entry.read_to_string(&mut entry);
+        let result = bookmark_cleanup(entry);
+
+        assert_eq!(result, Some(String::from("https://www.reddit.com/r/Metal/comments/3quxqv/black_zuriaake_%E6%A2%A6%E9%82%80_2015_china_ffo_actual_chinese/")));
+    }
+
+    #[test]
+    fn test_parse_bookmark() {
+        let input_file = File::open("test_resources/example_bookmark.html").expect("could not open bookmark");
+
+        let mut result = parse_song_links_from_bookmark(&input_file);
+        result.retain(|elem| elem.host_str() == Some("www.reddit.com"));
+
+        assert!(result.len() >= 527);
     }
 
     #[test]
@@ -374,6 +414,10 @@ mod test {
         let filename = PathBuf::from("/tmp/_reddit_scrape_test.json");
         let io_result = save_json_file(&filename, &json);
         assert!(io_result.is_ok());
+
+        let result_write_to_same_file = save_json_file(&filename, &json);
+        assert!(result_write_to_same_file.is_ok());
+
         let result = load_json_file(&filename);
         assert_eq!(Some(json), result);
     }
@@ -438,7 +482,7 @@ mod test {
         let jsons = get_entries(vec![url], &mut cache);
 
         // NB(nils): this might fail if the cache does not work
-        // NB(nils): and the json is instead downloaded
+        // NB(nils): and the (updated) json is instead downloaded
         assert_eq!(vec![json], jsons);
     }
 
