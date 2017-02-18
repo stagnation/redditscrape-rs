@@ -1,6 +1,7 @@
 extern crate url;
 extern crate serde_json;
 extern crate curl;
+extern crate clap;
 
 use std::fs::File;
 use std::path::{PathBuf,Path};
@@ -271,8 +272,7 @@ fn ensure_json_link(link: Url) -> Url {
 /// input: links / file
 /// input: cache directory
 fn main() {
-    // NB(nils): provide cache directory
-    let input_file = File::open("input.txt");
+    let input_file = File::open("test_resources/example_links.txt");
     let input_file = match input_file {
         Ok(f) => f,
         Err(e) => panic!(e),
@@ -312,7 +312,7 @@ mod test {
 
     #[test]
     fn test_parse_link_file() {
-        let input_file = File::open("input.txt").expect("could not open input file");
+        let input_file = File::open("test_resources/example_links.txt").expect("could not open input file");
 
         let result = parse_song_links_from_plain(&input_file);
         let expected = vec![
