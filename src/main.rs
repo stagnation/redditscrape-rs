@@ -2,6 +2,7 @@ extern crate url;
 extern crate serde_json;
 extern crate curl;
 extern crate clap;
+extern crate time;
 
 use std::fs::File;
 use std::path::{PathBuf,Path};
@@ -21,9 +22,11 @@ struct RedditEntry {
     subreddit: Option<String>,
     votes: Option<u64>,
     comments: Option<u64>,
+    self_link: Option<Url>,
 }
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 #[derive(Debug,Eq,PartialEq)]
 struct Cache {
@@ -191,6 +194,75 @@ fn parse_song_links_from_bookmark(bookmark: &File) -> Vec<Url> {
     parse_song_links_from_file(bookmark, bookmark_cleanup)
 }
 
+fn throttle<F, A, B>(previous: time::Tm, func: F, arg: A) -> (B, time::Tm)
+    where F: Fn(A) -> B  {
+        let duration = time::Duration::seconds(2); // reddit's two-second rule
+        let time_diff = time::now() - previous;
+        let zero = time::Duration::seconds(0) ;
+
+        assert!(time_diff > zero);
+        let sleep_duration = time_diff - duration;
+        if sleep_duration > zero {
+            std::thread::sleep(sleep_duration.to_std().expect("duration error"));
+        }
+
+        (func(arg), time::now())
+    }
+
+/// funny tuple to facilitate throttle wrapper function
+fn download_reddit_and_cache(tup: (&Url, &mut Option<&mut Cache>)) -> Option<RedditEntry>
+{
+    let (url, cache) = tup;
+    let cache: &mut Option<&mut Cache> = cache;
+    let json = download_json(url);
+    match json {
+        Some(json) => {
+            // if let Some(&mut cache) = cache {
+            let _ = match cache {
+                &mut Some(ref mut cache) => cache.store(id_from_link(url)
+                                                 .expect("could not parse id"), &json),
+                &mut None => Ok(()),
+            };
+            parse_reddit_json(&json)
+        },
+        None => None,
+    }
+}
+
+fn bookmark_to_reddit(bookmark: &File, cache: Option<&mut Cache>) -> Vec<RedditEntry> {
+    let urls = parse_song_links_from_bookmark(bookmark);
+    let mut reddits: Vec<RedditEntry> = Vec::new();
+
+    let mut cache = match cache {
+        Some(cache) => {
+            reddits.extend(get_entries(&urls, &cache)
+                           .iter().filter_map(parse_reddit_json)
+                                  .collect::<Vec<RedditEntry>>());
+            Some(cache)
+        },
+        None => None,
+    };
+
+    let urls_found_in_cache = reddits.iter().filter_map(|r| r.self_link.clone())
+                                            .collect::<HashSet<Url>>();
+    let urls_set = urls.into_iter().collect::<HashSet<Url>>();
+    let missing_urls = urls_set.difference(&urls_found_in_cache);
+
+    let mut previous = time::now();
+    for url in missing_urls {
+        let tup = throttle(previous, download_reddit_and_cache, (url, &mut cache));
+        previous = tup.1;
+
+        let reddit = tup.0;
+        match reddit {
+            Some(reddit) => reddits.push(reddit),
+            None => continue,
+        };
+    }
+
+    reddits
+}
+
 fn parse_song_links_from_file<'line_life, F>(file: &File, line_preprocess: F) -> Vec<Url>
 where F: Fn(String) -> Option<String> {
     let mut res : Vec<Url> = vec![];
@@ -205,8 +277,7 @@ where F: Fn(String) -> Option<String> {
 
         let url = Url::parse(&preprocessed);
         match url {
-            Err(e) => {
-                // println!("parse error: {}: {:?}", e, line);
+            Err(_) => {
                 continue;
             },
             Ok(url) => res.push(url),
@@ -229,6 +300,17 @@ fn parse_reddit_json(json: &Json) -> Option<RedditEntry> {
     let url_string = value_to_string(deref.find("url"));
     let url = url_string.map(|u| Url::parse(u.as_str()));
 
+    let relative_permalink = value_to_string(deref.find("permalink"));
+    let permalink = match relative_permalink {
+        Some(relative_permalink) => {
+            let permalink = String::from("https://www.reddit.com");
+            let permalink = format!("{}{}", permalink, relative_permalink);
+            let permalink_url = Url::parse(permalink.as_str()).ok();
+            permalink_url
+        },
+        None => None,
+    };
+
     Some(RedditEntry {
         url:       url.expect("could not parse json url").ok(),
         reddit_id: value_to_string(deref.find("id")),
@@ -236,28 +318,27 @@ fn parse_reddit_json(json: &Json) -> Option<RedditEntry> {
         subreddit: value_to_string(deref.find("subreddit")),
         votes:     deref.find("score")       .and_then(|x| x.as_u64()),
         comments:  deref.find("num_comments").and_then(|x| x.as_u64()),
+        self_link: permalink,
     })
 }
 
-fn get_entries(links: Vec<Url>, cache: &mut Cache) -> Vec<Json> {
+fn get_entries(links: &Vec<Url>, cache: &Cache) -> Vec<Json> {
     let mut jsons = Vec::with_capacity(links.len());
     for link in links {
         let key = id_from_link(&link).expect("could not extract id from link");
-        let json = match cache.try_to_get(&key) {
-            Some(json) => json,
+        match cache.try_to_get(&key) {
+            Some(json) => jsons.push(json),
             None => {
-                let json = download_json(link.clone());
-                cache.store(key, &json).expect("could not store in cache");
-                json
+                println!("Warning: could not extract {} from cache", key);
+                continue;
             },
         };
-        jsons.push(json);
     }
     jsons
 }
 
-// NB(nils): keep in mind reddit's two second rule
-fn download_json(link: Url) -> Json {
+fn download_json(link: &Url) -> Option<Json> {
+    // FIXME(nils): error handling
     let link = ensure_json_link(link);
 
     let mut handle = Easy::new();
@@ -275,12 +356,12 @@ fn download_json(link: Url) -> Json {
 
     let response = Json::from_utf8(data).expect("could not stringify data");
 
-    response
+    Some(response)
 }
 
-fn ensure_json_link(link: Url) -> Url {
+fn ensure_json_link(link: &Url) -> Url {
     match link.as_str().ends_with(".json") {
-        true =>  link,
+        true =>  link.clone(),
         false => link.join(".json").expect("json url could not be constructed"),
     }
 }
@@ -324,6 +405,7 @@ mod test {
             votes:     Some(83),
             url:       Url::parse("https://www.youtube.com/watch?v=bbvBJMDbyeo").ok(),
             reddit_id: Some(String::from("5k0ncr")),
+            self_link: Url::parse("https://www.reddit.com/r/Metal/comments/5k0ncr/black_weakling_dead_as_dreams/").ok(),
         };
         assert_eq!(result, Some(expected));
     }
@@ -350,6 +432,7 @@ mod test {
         let read_result = bookmark_entry.read_to_string(&mut entry);
         let result = bookmark_cleanup(entry);
 
+        assert!(read_result.is_ok());
         assert_eq!(result, Some(String::from("https://www.reddit.com/r/Metal/comments/3quxqv/black_zuriaake_%E6%A2%A6%E9%82%80_2015_china_ffo_actual_chinese/")));
     }
 
@@ -368,13 +451,13 @@ mod test {
         let url = Url::parse("https://www.reddit.com/r/BlackMetal/comments/5elhkp/spectral_lore_cosmic_significance/").unwrap();
         let expected = Url::parse("https://www.reddit.com/r/BlackMetal/comments/5elhkp/spectral_lore_cosmic_significance/.json").unwrap();
 
-        assert_eq!(ensure_json_link(url), expected);
-        assert_eq!(ensure_json_link(expected.clone()), expected);
+        assert_eq!(ensure_json_link(&url), expected);
+        assert_eq!(ensure_json_link(&expected), expected);
 
         let url = Url::parse("http://aelv.se/spill/ul/test_json.json")
             .expect("could not parse url");
 
-        assert_eq!(ensure_json_link(url.clone()), url);
+        assert_eq!(ensure_json_link(&url), url);
     }
 
     #[test]
@@ -405,10 +488,39 @@ mod test {
             .expect("could not parse test url");
         let expected = Json::from("{ \"a\" : \"b\" }\n");
 
-        assert_eq!(download_json(url), expected);
+        assert_eq!(download_json(&url), Some(expected));
     }
 
     #[test]
+    fn test_download_and_cache() {
+        // TODO(nils): ticking time bomb - relying on reddit to keep this page
+        let url = Url::parse("https://www.reddit.com/r/Metal/comments/5k0ncr/black_weakling_dead_as_dreams/")
+            .expect("could not parse url");
+        let json = download_json(&url).expect("could not download json");
+        let expected = parse_reddit_json(&json);
+
+        let downloaded = download_reddit_and_cache((&url , &mut None));
+        assert!(downloaded.is_some());
+        assert_eq!(downloaded.map(|x| x.url),
+                   expected.map(|x| x.url));
+
+        let cache_directory_path = "/tmp/_reddit_scrape_test_cache_empty/";
+        let mut cache = Cache::new(&cache_directory_path);
+
+        let key = id_from_link(&url).expect("could not create cache key");
+        let result = cache.try_to_get(&key);
+        assert!(result.is_none());
+
+        let expected = parse_reddit_json(&json);
+        let downloaded =download_reddit_and_cache((&url, &mut Some(&mut cache)));
+        assert!(downloaded.is_some());
+        assert_eq!(downloaded.map(|x| x.url),
+                   expected.map(|x| x.url));
+        assert!(cache.try_to_get(&key).is_some());
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
     fn test_json_IO() {
         let json = Json::from("{ \"a\" : \"b\" }\n");
         let filename = PathBuf::from("/tmp/_reddit_scrape_test.json");
@@ -445,6 +557,7 @@ mod test {
     }
 
     #[test]
+    #[allow(non_snake_case)]
     fn test_cache_IO() {
         let filepath = "test_resources/5k0ncr.json";
         let cache_directory_path = "/tmp/_reddit_scrape_test_cache/";
@@ -479,7 +592,7 @@ mod test {
 
         let url = Url::parse("https://www.reddit.com/r/Metal/comments/5k0ncr/black_weakling_dead_as_dreams/")
             .expect("could not parse url");
-        let jsons = get_entries(vec![url], &mut cache);
+        let jsons = get_entries(&vec![url], &mut cache);
 
         // NB(nils): this might fail if the cache does not work
         // NB(nils): and the (updated) json is instead downloaded
