@@ -13,6 +13,7 @@ use std::ffi::OsStr;
 
 use url::Url;
 use curl::easy::Easy;
+use clap::{App,Arg};
 
 #[derive(Debug, PartialEq, Eq)]
 struct RedditEntry {
@@ -57,7 +58,6 @@ impl Cache {
 
     fn store(&mut self, key: String, data: &Json) -> Result<(), Error> {
         let filename = self.directory.join(format!("{}.json", key));
-        println!("{:?}", filename); //DEBUG
         match save_json_file(&filename, &data) {
             // TODO(nils): and_then?
             Ok(()) => {
@@ -73,10 +73,14 @@ impl Cache {
         where P: AsRef<Path>
     {
         let cache_directory_path: &Path = cache_directory_path.as_ref();
-        assert!(cache_directory_path.is_dir(), "cache path needs to be a directory");
+
+        if ! cache_directory_path.is_dir() {
+            return None;
+        }
 
         let cache_content = std::fs::read_dir(cache_directory_path);
 
+        // TODO(nils): what happens if cache is empty?
         match cache_content { // any error reading contents of directory?
             Err(_) => return None,
             Ok(cache_content) => {
@@ -101,7 +105,7 @@ impl Cache {
                 for json in result {
                     parse_reddit_json(&json).map(|reddit|
                                                 reddit.reddit_id.map(|id| storage.insert(id, json))
-                                               );
+                                                );
                 }
 
                 let storage = storage; // immutable
@@ -137,7 +141,11 @@ where T: AsRef<Path> {
 /// closely tied to filename_from_link
 fn id_from_link(link: &Url) -> Option<String> {
     let path_vec = link.path_segments().map(|c| c.collect::<Vec<_>>());
-    let mut path_vec = path_vec.expect("could not extract path segments");
+    let mut path_vec = match path_vec {
+        Some(path_vec) => path_vec,
+        None => return None,
+    };
+
     path_vec.retain(|elem| elem.len() > 1);
     let path_vec = path_vec;
 
@@ -232,6 +240,8 @@ fn bookmark_to_reddit(bookmark: &File, cache: Option<&mut Cache>) -> Vec<RedditE
     let urls = parse_song_links_from_bookmark(bookmark);
     let mut reddits: Vec<RedditEntry> = Vec::new();
 
+    println!("url count to download: {}", urls.len()); // DEBUG
+
     let mut cache = match cache {
         Some(cache) => {
             reddits.extend(get_entries(&urls, &cache)
@@ -254,7 +264,10 @@ fn bookmark_to_reddit(bookmark: &File, cache: Option<&mut Cache>) -> Vec<RedditE
 
         let reddit = tup.0;
         match reddit {
-            Some(reddit) => reddits.push(reddit),
+            Some(reddit) => {
+                println!("downloaded: {:?}", reddit.self_link);
+                reddits.push(reddit);
+            },
             None => continue,
         };
     }
@@ -262,11 +275,11 @@ fn bookmark_to_reddit(bookmark: &File, cache: Option<&mut Cache>) -> Vec<RedditE
     reddits
 }
 
-fn parse_song_links_from_file<'line_life, F>(file: &File, line_preprocess: F) -> Vec<Url>
+fn parse_song_links_from_file<F>(file: &File, line_preprocess: F) -> Vec<Url>
 where F: Fn(String) -> Option<String> {
     let mut res : Vec<Url> = vec![];
-    let file = BufReader::new(file);
-    for line in file.lines() {
+    let mut file_reader = BufReader::new(file);
+    for line in file_reader.lines() {
         unwrap_or_skip!(line, "buf reader error");
 
         let preprocessed = match line_preprocess(line){
@@ -324,7 +337,11 @@ fn parse_reddit_json(json: &Json) -> Option<RedditEntry> {
 fn get_entries(links: &Vec<Url>, cache: &Cache) -> Vec<Json> {
     let mut jsons = Vec::with_capacity(links.len());
     for link in links {
-        let key = id_from_link(&link).expect("could not extract id from link");
+        let key = match id_from_link(&link) {
+            Some(key) => key,
+            None => continue,
+        };
+
         match cache.try_to_get(&key) {
             Some(json) => jsons.push(json),
             None => {
@@ -370,16 +387,53 @@ fn ensure_json_link(link: &Url) -> Url {
 /// input: links / file
 /// input: cache directory
 fn main() {
-    let input_file = File::open("test_resources/example_links.txt");
-    let input_file = match input_file {
+    let program = App::new("Reddit Scrape")
+        .arg(Arg::with_name("input")
+             .short("i")
+             .long("input")
+             .help("input file, either plain text or a [firefox] bookmark file")
+             .required(true)
+             .takes_value(true))
+        .arg(Arg::with_name("cache")
+             .short("c")
+             .long("cache")
+             .help("directory to use as cache, will be read if present and filled with new files")
+             .takes_value(true))
+        .get_matches();
+
+    let input_file = File::open(program.value_of("input").unwrap());
+    let mut input_file = match input_file {
         Ok(f) => f,
         Err(e) => panic!(e),
     };
 
-    let links = parse_song_links_from_plain(&input_file);
-    println!("---");
+    let links = parse_song_links_from_bookmark(&input_file);
+    input_file.seek(std::io::SeekFrom::Start(0));
+    // let links = parse_song_links_from_bookmark(&input_file);
+
     for link in links  {
-        println!("> {}", link);
+        println!("> input: {}", link);
+    }
+
+    let mut cache;
+    let cache_opt = match program.value_of("cache") {
+        Some(cache_directory_path) => {
+            cache = match Cache::load_cache_from_directory(&cache_directory_path) {
+                Some(cache) => cache,
+                None => Cache::new(&cache_directory_path),
+            };
+            println!("loaded cache: {:#?}", cache.storage.keys());
+            Some(&mut cache)
+        },
+        None => None,
+    };
+
+    let reddits = bookmark_to_reddit(&input_file, cache_opt);
+    for reddit in reddits {
+        match reddit.url {
+            Some(link) => println!("{}", link),
+            None => continue,
+        };
     }
 }
 
@@ -437,8 +491,15 @@ mod test {
 
     #[test]
     fn test_parse_bookmark() {
-        let input_file = File::open("test_resources/example_bookmark.html").expect("could not open bookmark");
+        let mut input_file = File::open("test_resources/example_bookmark.html").expect("could not open bookmark");
+        _test_parse_bookmark(&input_file);
+        // test that a file can be parsed twice,
+        // "rewind"
+        input_file.seek(std::io::SeekFrom::Start(0));
+        _test_parse_bookmark(&input_file);
+    }
 
+    fn _test_parse_bookmark(input_file: &File) {
         let mut result = parse_song_links_from_bookmark(&input_file);
         result.retain(|elem| elem.host_str() == Some("www.reddit.com"));
 
@@ -597,6 +658,27 @@ mod test {
         // NB(nils): this might fail if the cache does not work
         // NB(nils): and the (updated) json is instead downloaded
         assert_eq!(vec![json], jsons);
+    }
+
+    #[test]
+    fn test_bookmark_to_reddit() {
+        let bookmark = File::open("test_resources/bookmark_entry.txt")
+            .expect("could not read bookmark");
+        let result = bookmark_to_reddit(&bookmark, None);
+        let expected = RedditEntry {
+            url: Url::parse("https://www.youtube.com/watch?v=Jv-HBOA9E0w").ok(),
+            reddit_id: Some(String::from("3quxqv")),
+            title: Some(String::from("[Black] Zuriaake - 梦邀 (2015, China, FFO: actual Chinese BM, Paysage d\'Hiver, Lunar Aurora)")),
+            subreddit: Some(String::from("Metal")),
+            votes: Some(24),
+            comments: Some(4),
+            self_link: Url::parse("https://www.reddit.com/r/Metal/comments/3quxqv/black_zuriaake_%E6%A2%A6%E9%82%80_2015_china_ffo_actual_chinese/").ok()
+        };
+
+        assert!(result.len() == 1);
+        let get_inportant_fields = |x: &RedditEntry| (x.url.clone(), x.self_link.clone()); // reddit fuzzes votes
+        assert_eq!(get_inportant_fields(&result[0]),
+                   get_inportant_fields(&expected));
     }
 
 }
