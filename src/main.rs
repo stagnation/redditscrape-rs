@@ -217,7 +217,6 @@ fn download_reddit_and_cache(tup: (&Url, &mut Option<&mut Cache>)) -> Option<Red
     let json = download_json(url);
     match json {
         Some(json) => {
-            // if let Some(&mut cache) = cache {
             let _ = match cache {
                 &mut Some(ref mut cache) => cache.store(id_from_link(url)
                                                  .expect("could not parse id"), &json),
@@ -494,7 +493,8 @@ mod test {
     #[test]
     fn test_download_and_cache() {
         // TODO(nils): ticking time bomb - relying on reddit to keep this page
-        let url = Url::parse("https://www.reddit.com/r/Metal/comments/5k0ncr/black_weakling_dead_as_dreams/")
+        // let url = Url::parse("https://www.reddit.com/r/Metal/comments/5k0ncr/black_weakling_dead_as_dreams/")
+        let url = Url::parse("http://aelv.se/spill/ul/test_resources/5k0ncr.json")
             .expect("could not parse url");
         let json = download_json(&url).expect("could not download json");
         let expected = parse_reddit_json(&json);
@@ -512,7 +512,7 @@ mod test {
         assert!(result.is_none());
 
         let expected = parse_reddit_json(&json);
-        let downloaded =download_reddit_and_cache((&url, &mut Some(&mut cache)));
+        let downloaded = download_reddit_and_cache((&url, &mut Some(&mut cache)));
         assert!(downloaded.is_some());
         assert_eq!(downloaded.map(|x| x.url),
                    expected.map(|x| x.url));
