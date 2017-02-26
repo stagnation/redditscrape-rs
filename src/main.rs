@@ -202,14 +202,15 @@ fn parse_song_links_from_bookmark(bookmark: &File) -> Vec<Url> {
     parse_song_links_from_file(bookmark, bookmark_cleanup)
 }
 
+// TODO(nils): don't throttle if the func did not return
 fn throttle<F, A, B>(previous: time::Tm, func: F, arg: A) -> (B, time::Tm)
-    where F: Fn(A) -> B  {
-        let duration = time::Duration::seconds(2); // reddit's two-second rule
+    where F: Fn(A) -> B {
+        let duration = time::Duration::seconds(3); // reddit's cooldown rule
         let time_diff = time::now() - previous;
         let zero = time::Duration::seconds(0) ;
 
         assert!(time_diff > zero);
-        let sleep_duration = time_diff - duration;
+        let sleep_duration = duration - time_diff;
         if sleep_duration > zero {
             std::thread::sleep(sleep_duration.to_std().expect("duration error"));
         }
@@ -222,29 +223,34 @@ fn download_reddit_and_cache(tup: (&Url, &mut Option<&mut Cache>)) -> Option<Red
 {
     let (url, cache) = tup;
     let cache: &mut Option<&mut Cache> = cache;
-    let json = download_json(url);
-    match json {
-        Some(json) => {
-            let _ = match cache {
-                &mut Some(ref mut cache) => cache.store(id_from_link(url)
-                                                 .expect("could not parse id"), &json),
-                &mut None => Ok(()),
+
+    let json = match download_json(url) {
+        Some(json) => json,
+        None => return None,
+    };
+
+    match cache {
+        &mut Some(ref mut cache) => {
+            if let Some(key) = id_from_link(url) {
+                cache.store(key, &json);
             };
-            parse_reddit_json(&json)
         },
-        None => None,
-    }
+        &mut None => { ; },
+    };
+
+    parse_reddit_json(&json)
 }
 
 fn bookmark_to_reddit(bookmark: &File, cache: Option<&mut Cache>) -> Vec<RedditEntry> {
-    let urls = parse_song_links_from_bookmark(bookmark);
+    let mut links = parse_song_links_from_bookmark(bookmark);
+    links.retain(|link| link.host_str() == Some("www.reddit.com"));
     let mut reddits: Vec<RedditEntry> = Vec::new();
 
-    println!("url count to download: {}", urls.len()); // DEBUG
+    println!("url count to download: {}", links.len()); // DEBUG
 
     let mut cache = match cache {
         Some(cache) => {
-            reddits.extend(get_entries(&urls, &cache)
+            reddits.extend(get_entries(&links, &cache)
                            .iter().filter_map(parse_reddit_json)
                                   .collect::<Vec<RedditEntry>>());
             Some(cache)
@@ -252,13 +258,13 @@ fn bookmark_to_reddit(bookmark: &File, cache: Option<&mut Cache>) -> Vec<RedditE
         None => None,
     };
 
-    let urls_found_in_cache = reddits.iter().filter_map(|r| r.self_link.clone())
+    let links_found_in_cache = reddits.iter().filter_map(|r| r.self_link.clone())
                                             .collect::<HashSet<Url>>();
-    let urls_set = urls.into_iter().collect::<HashSet<Url>>();
-    let missing_urls = urls_set.difference(&urls_found_in_cache);
+    let links_set = links.into_iter().collect::<HashSet<Url>>();
+    let missing_links = links_set.difference(&links_found_in_cache);
 
     let mut previous = time::now();
-    for url in missing_urls {
+    for url in missing_links {
         let tup = throttle(previous, download_reddit_and_cache, (url, &mut cache));
         previous = tup.1;
 
@@ -301,9 +307,16 @@ where F: Fn(String) -> Option<String> {
 
 // TODO(nils): error handling
 fn parse_reddit_json(json: &Json) -> Option<RedditEntry> {
-    let json_parser: serde_json::Value = serde_json::from_str(&json).expect("could not parse json");
+    let json_parser: serde_json::Value = match serde_json::from_str(&json) {
+        Ok(parse) => parse,
+        Err(_) => return None,
+    };
+
     let pointer = "/0/data/children/0/data";
-    let deref = json_parser.pointer(pointer).expect("could not dereference json pointer");
+    let deref = match json_parser.pointer(pointer) {
+        Some(deref) => deref,
+        None => return None,
+    };
 
     let value_to_string = |val: Option<&serde_json::Value>| {
         val.map(|x| x.clone().as_str().unwrap().to_string())
@@ -344,10 +357,7 @@ fn get_entries(links: &Vec<Url>, cache: &Cache) -> Vec<Json> {
 
         match cache.try_to_get(&key) {
             Some(json) => jsons.push(json),
-            None => {
-                println!("Warning: could not extract {} from cache", key);
-                continue;
-            },
+            None => continue,
         };
     }
     jsons
@@ -355,7 +365,11 @@ fn get_entries(links: &Vec<Url>, cache: &Cache) -> Vec<Json> {
 
 fn download_json(link: &Url) -> Option<Json> {
     // FIXME(nils): error handling
-    let link = ensure_json_link(link);
+    let link = match ensure_json_link(link) {
+        Some(link) => link,
+        None => return None,
+    };
+    println!("processing {:?}", link);
 
     let mut handle = Easy::new();
     let mut data = Vec::new();
@@ -367,7 +381,10 @@ fn download_json(link: &Url) -> Option<Json> {
             data.extend_from_slice(new_data);
             Ok(new_data.len())
         }).expect("download error");
-        transfer.perform().expect("transfer error");
+        match transfer.perform() {
+            Err(_) => return None,
+            x => x,
+        };
     }
 
     let response = Json::from_utf8(data).expect("could not stringify data");
@@ -375,10 +392,10 @@ fn download_json(link: &Url) -> Option<Json> {
     Some(response)
 }
 
-fn ensure_json_link(link: &Url) -> Url {
+fn ensure_json_link(link: &Url) -> Option<Url> {
     match link.as_str().ends_with(".json") {
-        true =>  link.clone(),
-        false => link.join(".json").expect("json url could not be constructed"),
+        true =>  Some(link.clone()),
+        false => link.join(".json").ok(),
     }
 }
 
@@ -407,13 +424,9 @@ fn main() {
         Err(e) => panic!(e),
     };
 
-    let links = parse_song_links_from_bookmark(&input_file);
+    let mut links = parse_song_links_from_bookmark(&input_file);
     input_file.seek(std::io::SeekFrom::Start(0));
-    // let links = parse_song_links_from_bookmark(&input_file);
 
-    for link in links  {
-        println!("> input: {}", link);
-    }
 
     let mut cache;
     let cache_opt = match program.value_of("cache") {
@@ -679,6 +692,19 @@ mod test {
         let get_inportant_fields = |x: &RedditEntry| (x.url.clone(), x.self_link.clone()); // reddit fuzzes votes
         assert_eq!(get_inportant_fields(&result[0]),
                    get_inportant_fields(&expected));
+    }
+
+    #[test]
+    fn test_throttle() {
+        let mut previous = time::now();
+
+        let func = |_: u32| 1;
+        let tup = throttle(previous, &func, 1); // first call may return imediately
+        previous = tup.1;
+
+        let tup = throttle(previous, &func, 1); // second call must be throttled
+        assert!(tup.1 - previous > time::Duration::seconds(1));
+
     }
 
 }
