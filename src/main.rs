@@ -1,19 +1,20 @@
-extern crate url;
-extern crate serde_json;
-extern crate curl;
 extern crate clap;
+extern crate csv;
+extern crate curl;
+extern crate serde_json;
 extern crate time;
+extern crate url;
 
-use std::fs::File;
-use std::path::{PathBuf,Path};
-use std::io::prelude::*;
-use std::io::Error;
-use std::io::BufReader;
 use std::ffi::OsStr;
+use std::fs::File;
+use std::io::BufReader;
+use std::io::Error;
+use std::io::prelude::*;
+use std::path::{PathBuf,Path};
 
-use url::Url;
-use curl::easy::Easy;
 use clap::{App,Arg};
+use curl::easy::Easy;
+use url::Url;
 
 #[derive(Debug, PartialEq, Eq)]
 struct RedditEntry {
@@ -322,15 +323,16 @@ fn parse_reddit_json(json: &Json) -> Option<RedditEntry> {
         Some(deref) => deref,
         None => return None,
     };
+    let deref: &serde_json::Value = deref;
 
     let value_to_string = |val: Option<&serde_json::Value>| {
         val.map(|x| x.clone().as_str().unwrap().to_string())
     };
 
-    let url_string = value_to_string(deref.find("url"));
+    let url_string = value_to_string(deref.get("url"));
     let url = url_string.map(|u| Url::parse(u.as_str()));
 
-    let relative_permalink = value_to_string(deref.find("permalink"));
+    let relative_permalink = value_to_string(deref.get("permalink"));
     let permalink = match relative_permalink {
         Some(relative_permalink) => {
             let permalink = String::from("https://www.reddit.com");
@@ -343,11 +345,11 @@ fn parse_reddit_json(json: &Json) -> Option<RedditEntry> {
 
     Some(RedditEntry {
         url:       url.expect("could not parse json url").ok(),
-        reddit_id: value_to_string(deref.find("id")),
-        title:     value_to_string(deref.find("title")),
-        subreddit: value_to_string(deref.find("subreddit")),
-        votes:     deref.find("score")       .and_then(|x| x.as_u64()),
-        comments:  deref.find("num_comments").and_then(|x| x.as_u64()),
+        reddit_id: value_to_string(deref.get("id")),
+        title:     value_to_string(deref.get("title")),
+        subreddit: value_to_string(deref.get("subreddit")),
+        votes:     deref.get("score")       .and_then(|x| x.as_u64()),
+        comments:  deref.get("num_comments").and_then(|x| x.as_u64()),
         self_link: permalink,
     })
 }
