@@ -215,7 +215,8 @@ fn throttle<F, A, B>(previous: time::Tm, func: F, arg: A) -> (B, time::Tm)
             std::thread::sleep(sleep_duration.to_std().expect("duration error"));
         }
 
-        (func(arg), time::now())
+        let result = func(arg);
+        (result, time::now())
     }
 
 /// funny tuple to facilitate throttle wrapper function
@@ -261,7 +262,11 @@ fn bookmark_to_reddit(bookmark: &File, cache: Option<&mut Cache>) -> Vec<RedditE
     let links_found_in_cache = reddits.iter().filter_map(|r| r.self_link.clone())
                                             .collect::<HashSet<Url>>();
     let links_set = links.into_iter().collect::<HashSet<Url>>();
-    let missing_links = links_set.difference(&links_found_in_cache);
+    let missing_links: Vec<&Url> = links_set.difference(&links_found_in_cache)
+        .into_iter().collect();
+
+    println!("missing url count to download: {} (not cached)",
+        missing_links.len()); // DEBUG(nils)
 
     let mut previous = time::now();
     for url in missing_links {
@@ -284,7 +289,7 @@ fn bookmark_to_reddit(bookmark: &File, cache: Option<&mut Cache>) -> Vec<RedditE
 fn parse_song_links_from_file<F>(file: &File, line_preprocess: F) -> Vec<Url>
 where F: Fn(String) -> Option<String> {
     let mut res : Vec<Url> = vec![];
-    let mut file_reader = BufReader::new(file);
+    let file_reader = BufReader::new(file);
     for line in file_reader.lines() {
         unwrap_or_skip!(line, "buf reader error");
 
@@ -416,17 +421,18 @@ fn main() {
              .long("cache")
              .help("directory to use as cache, will be read if present and filled with new files")
              .takes_value(true))
+        .arg(Arg::with_name("verbose")
+             .short("v")
+             .long("verbose")
+             .help("verbose output"))
         .get_matches();
 
+    let verbose: bool = program.value_of("verbose").is_some();
     let input_file = File::open(program.value_of("input").unwrap());
-    let mut input_file = match input_file {
+    let input_file = match input_file {
         Ok(f) => f,
         Err(e) => panic!(e),
     };
-
-    let mut links = parse_song_links_from_bookmark(&input_file);
-    input_file.seek(std::io::SeekFrom::Start(0));
-
 
     let mut cache;
     let cache_opt = match program.value_of("cache") {
@@ -435,18 +441,19 @@ fn main() {
                 Some(cache) => cache,
                 None => Cache::new(&cache_directory_path),
             };
-            println!("loaded cache: {:#?}", cache.storage.keys());
             Some(&mut cache)
         },
         None => None,
     };
 
     let reddits = bookmark_to_reddit(&input_file, cache_opt);
-    for reddit in reddits {
-        match reddit.url {
-            Some(link) => println!("{}", link),
-            None => continue,
-        };
+    if verbose {
+        for reddit in reddits {
+            match reddit.url {
+                Some(link) => println!("{}", link),
+                None => continue,
+            };
+        }
     }
 }
 
@@ -487,7 +494,6 @@ mod test {
         ];
 
         assert_eq!(result, expected);
-
     }
 
     #[test]
@@ -524,13 +530,13 @@ mod test {
         let url = Url::parse("https://www.reddit.com/r/BlackMetal/comments/5elhkp/spectral_lore_cosmic_significance/").unwrap();
         let expected = Url::parse("https://www.reddit.com/r/BlackMetal/comments/5elhkp/spectral_lore_cosmic_significance/.json").unwrap();
 
-        assert_eq!(ensure_json_link(&url), expected);
-        assert_eq!(ensure_json_link(&expected), expected);
+        assert_eq!(ensure_json_link(&url), Some(expected.clone()));
+        assert_eq!(ensure_json_link(&expected), Some(expected.clone()));
 
         let url = Url::parse("http://aelv.se/spill/ul/test_json.json")
             .expect("could not parse url");
 
-        assert_eq!(ensure_json_link(&url), url);
+        assert_eq!(ensure_json_link(&url), Some(url));
     }
 
     #[test]
