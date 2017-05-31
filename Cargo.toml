@@ -11,7 +11,4 @@ serde_derive = "1.0.6"
 curl = "0.4.2"
 clap = "2.2.0"
 time = "0.1.0"
-
-[dependencies.csv]
-git = "https://github.com/BurntSushi/rust-csv/"
-branch = "rewrite"
+csv = "1.0.0-beta.3"

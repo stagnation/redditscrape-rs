@@ -4,6 +4,8 @@ extern crate curl;
 extern crate serde_json;
 extern crate time;
 extern crate url;
+extern crate serde;
+#[macro_use] extern crate serde_derive;
 
 use std::ffi::OsStr;
 use std::fs::File;
@@ -11,20 +13,62 @@ use std::io::BufReader;
 use std::io::Error;
 use std::io::prelude::*;
 use std::path::{PathBuf,Path};
+use std::fmt;
+use serde::ser::{Serialize, Serializer};
 
 use clap::{App,Arg};
 use curl::easy::Easy;
 use url::Url;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Link(Url); // TODO(nils): instead of using Link in all locations
+                  // TODO(nils): it might be easier to make a
+                  // TODO(nils): RedditEntry_Print(csv) and only convert before
+                  // TODO(nils): printing
+
+impl Serialize for Link {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where S: Serializer
+        {
+            let &Link(ref url) = self;
+            serializer.serialize_str(url.as_str())
+        }
+}
+
+impl fmt::Display for Link {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let &Link(ref url) = self;
+        write!(f, "{}", url.as_str())
+    }
+}
+
+fn parse(input: &str) -> Option<Link> {
+    Url::parse(input).ok().map(|x| Link(x))
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
 struct RedditEntry {
-    url: Option<Url>,
+    url: Option<Link>,
     reddit_id: Option<String>,
     title: Option<String>,
     subreddit: Option<String>,
     votes: Option<u64>,
     comments: Option<u64>,
-    self_link: Option<Url>,
+    self_link: Option<Link>,
+}
+
+impl RedditEntry {
+    fn new() -> RedditEntry {
+        RedditEntry{
+            title:     Some(String::from("[Black] Weakling - Dead as Dreams")),
+            subreddit: Some(String::from("Metal")),
+            comments:  Some(12),
+            votes:     Some(83),
+            url:       parse("https://www.youtube.com/watch?v=bbvBJMDbyeo"),
+            reddit_id: Some(String::from("5k0ncr")),
+            self_link: parse("https://www.reddit.com/r/Metal/comments/5k0ncr/black_weakling_dead_as_dreams/"),
+        }
+    }
 }
 
 use std::collections::HashMap;
@@ -234,7 +278,7 @@ fn download_reddit_and_cache(tup: (&Url, &mut Option<&mut Cache>)) -> Option<Red
     match cache {
         &mut Some(ref mut cache) => {
             if let Some(key) = id_from_link(url) {
-                cache.store(key, &json);
+                let _ = cache.store(key, &json);
             };
         },
         &mut None => { ; },
@@ -261,16 +305,17 @@ fn bookmark_to_reddit(bookmark: &File, cache: Option<&mut Cache>) -> Vec<RedditE
     };
 
     let links_found_in_cache = reddits.iter().filter_map(|r| r.self_link.clone())
-                                            .collect::<HashSet<Url>>();
-    let links_set = links.into_iter().collect::<HashSet<Url>>();
-    let missing_links: Vec<&Url> = links_set.difference(&links_found_in_cache)
+                                            .collect::<HashSet<Link>>();
+    let links_set = links.into_iter().map(|x| Link(x)).collect::<HashSet<Link>>();
+    let missing_links: Vec<&Link> = links_set.difference(&links_found_in_cache)
         .into_iter().collect();
 
     println!("missing url count to download: {} (not cached)",
         missing_links.len()); // DEBUG(nils)
 
     let mut previous = time::now();
-    for url in missing_links {
+    for link in missing_links {
+        let &Link(ref url) = link;
         let tup = throttle(previous, download_reddit_and_cache, (url, &mut cache));
         previous = tup.1;
 
@@ -331,6 +376,8 @@ fn parse_reddit_json(json: &Json) -> Option<RedditEntry> {
 
     let url_string = value_to_string(deref.get("url"));
     let url = url_string.map(|u| Url::parse(u.as_str()));
+    let url = url.expect("could not parse json url");
+    let url = url.map(|x| Link(x)).ok();
 
     let relative_permalink = value_to_string(deref.get("permalink"));
     let permalink = match relative_permalink {
@@ -342,9 +389,10 @@ fn parse_reddit_json(json: &Json) -> Option<RedditEntry> {
         },
         None => None,
     };
+    let permalink = permalink.map(|x| Link(x));
 
     Some(RedditEntry {
-        url:       url.expect("could not parse json url").ok(),
+        url:       url,
         reddit_id: value_to_string(deref.get("id")),
         title:     value_to_string(deref.get("title")),
         subreddit: value_to_string(deref.get("subreddit")),
@@ -388,7 +436,7 @@ fn download_json(link: &Url) -> Option<Json> {
             data.extend_from_slice(new_data);
             Ok(new_data.len())
         }).expect("download error");
-        match transfer.perform() {
+        let _ = match transfer.perform() {
             Err(_) => return None,
             x => x,
         };
@@ -411,12 +459,18 @@ fn ensure_json_link(link: &Url) -> Option<Url> {
 /// input: links / file
 /// input: cache directory
 fn main() {
+    assert!(false, "write csv header!");
     let program = App::new("Reddit Scrape")
         .arg(Arg::with_name("input")
              .short("i")
              .long("input")
              .help("input file, either plain text or a [firefox] bookmark file")
              .required(true)
+             .takes_value(true))
+        .arg(Arg::with_name("output")
+             .short("o")
+             .long("output")
+             .help("output file name - a csv file will be written")
              .takes_value(true))
         .arg(Arg::with_name("cache")
              .short("c")
@@ -429,6 +483,7 @@ fn main() {
              .help("verbose output"))
         .get_matches();
 
+    let output_file = program.value_of("output").unwrap_or("scrape.csv");
     let verbose: bool = program.value_of("verbose").is_some();
     let input_file = File::open(program.value_of("input").unwrap());
     let input_file = match input_file {
@@ -450,12 +505,17 @@ fn main() {
 
     let reddits = bookmark_to_reddit(&input_file, cache_opt);
     if verbose {
-        for reddit in reddits {
-            match reddit.url {
-                Some(link) => println!("{}", link),
-                None => continue,
+        for reddit in &reddits {
+            match &reddit.url {
+                &Some(ref link) => println!("{}", link),
+                &None => continue,
             };
         }
+    }
+
+    let mut writer = csv::Writer::from_path(output_file).unwrap();
+    for reddit in &reddits {
+        writer.serialize(reddit).expect("could not serialize reddit");
     }
 }
 
@@ -478,9 +538,9 @@ mod test {
             subreddit: Some(String::from("Metal")),
             comments:  Some(12),
             votes:     Some(83),
-            url:       Url::parse("https://www.youtube.com/watch?v=bbvBJMDbyeo").ok(),
+            url:       parse("https://www.youtube.com/watch?v=bbvBJMDbyeo"),
             reddit_id: Some(String::from("5k0ncr")),
-            self_link: Url::parse("https://www.reddit.com/r/Metal/comments/5k0ncr/black_weakling_dead_as_dreams/").ok(),
+            self_link: parse("https://www.reddit.com/r/Metal/comments/5k0ncr/black_weakling_dead_as_dreams/"),
         };
         assert_eq!(result, Some(expected));
     }
@@ -514,9 +574,8 @@ mod test {
     fn test_parse_bookmark() {
         let mut input_file = File::open("test_resources/example_bookmark.html").expect("could not open bookmark");
         _test_parse_bookmark(&input_file);
-        // test that a file can be parsed twice,
-        // "rewind"
-        input_file.seek(std::io::SeekFrom::Start(0));
+        // test that a file can be parsed twice, "rewind"
+        let _ = input_file.seek(std::io::SeekFrom::Start(0));
         _test_parse_bookmark(&input_file);
     }
 
@@ -574,8 +633,6 @@ mod test {
 
     #[test]
     fn test_download_and_cache() {
-        // TODO(nils): ticking time bomb - relying on reddit to keep this page
-        // let url = Url::parse("https://www.reddit.com/r/Metal/comments/5k0ncr/black_weakling_dead_as_dreams/")
         let url = Url::parse("http://aelv.se/spill/ul/test_resources/5k0ncr.json")
             .expect("could not parse url");
         let json = download_json(&url).expect("could not download json");
@@ -583,8 +640,7 @@ mod test {
 
         let downloaded = download_reddit_and_cache((&url , &mut None));
         assert!(downloaded.is_some());
-        assert_eq!(downloaded.map(|x| x.url),
-                   expected.map(|x| x.url));
+        assert_eq!(downloaded.map(|x| x.url), expected.map(|x| x.url));
 
         let cache_directory_path = "/tmp/_reddit_scrape_test_cache_empty/";
         let mut cache = Cache::new(&cache_directory_path);
@@ -596,8 +652,7 @@ mod test {
         let expected = parse_reddit_json(&json);
         let downloaded = download_reddit_and_cache((&url, &mut Some(&mut cache)));
         assert!(downloaded.is_some());
-        assert_eq!(downloaded.map(|x| x.url),
-                   expected.map(|x| x.url));
+        assert_eq!(downloaded.map(|x| x.url), expected.map(|x| x.url));
         assert!(cache.try_to_get(&key).is_some());
     }
 
@@ -687,13 +742,13 @@ mod test {
             .expect("could not read bookmark");
         let result = bookmark_to_reddit(&bookmark, None);
         let expected = RedditEntry {
-            url: Url::parse("https://www.youtube.com/watch?v=Jv-HBOA9E0w").ok(),
+            url: parse("https://www.youtube.com/watch?v=Jv-HBOA9E0w"),
             reddit_id: Some(String::from("3quxqv")),
             title: Some(String::from("[Black] Zuriaake - 梦邀 (2015, China, FFO: actual Chinese BM, Paysage d\'Hiver, Lunar Aurora)")),
             subreddit: Some(String::from("Metal")),
             votes: Some(24),
             comments: Some(4),
-            self_link: Url::parse("https://www.reddit.com/r/Metal/comments/3quxqv/black_zuriaake_%E6%A2%A6%E9%82%80_2015_china_ffo_actual_chinese/").ok()
+            self_link: parse("https://www.reddit.com/r/Metal/comments/3quxqv/black_zuriaake_%E6%A2%A6%E9%82%80_2015_china_ffo_actual_chinese/")
         };
 
         assert!(result.len() == 1);
@@ -713,6 +768,18 @@ mod test {
         let tup = throttle(previous, &func, 1); // second call must be throttled
         assert!(tup.1 - previous > time::Duration::seconds(1));
 
+    }
+
+    #[test]
+    fn test_write_csv() {
+        let reddit = RedditEntry::new();
+        let mut writer = csv::WriterBuilder::new()
+            .has_headers(false)
+            .from_writer(vec![]);
+        writer.serialize(reddit).expect("could not serialize reddit to csv");
+        let data = String::from_utf8(writer.into_inner().unwrap()).unwrap();
+
+        assert_eq!(data, "https://www.youtube.com/watch?v=bbvBJMDbyeo,5k0ncr,[Black] Weakling - Dead as Dreams,Metal,83,12,https://www.reddit.com/r/Metal/comments/5k0ncr/black_weakling_dead_as_dreams/\n");
     }
 
 }
